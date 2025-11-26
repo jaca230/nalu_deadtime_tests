@@ -31,6 +31,25 @@ class DeadtimeAnalysis:
         self.double_factor = double_factor
         self.df = df
 
+    def _channel_label(self, channel_count: float) -> str:
+        count = int(channel_count)
+        if count == 32:
+            return "32 channels (no injected signals on 16-31)"
+        return f"{count} channels"
+
+    def _annotate_no_signal_channel_runs(self, ax: plt.Axes) -> None:
+        note = "32-channel runs had no injected signals on channels 16-31 (control)."
+        ax.text(
+            0.01,
+            0.02,
+            note,
+            transform=ax.transAxes,
+            fontsize=9,
+            ha="left",
+            va="bottom",
+            bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.65},
+        )
+
     @classmethod
     def from_jsonl(
         cls,
@@ -111,7 +130,7 @@ class DeadtimeAnalysis:
             ax.set_xscale("log", base=2)
             ax.set_yscale("log", base=2)
             ax.set_title(
-                f"Observed rate vs. separation (channels={int(channel_count)}, pulser={pulse_rate_hz:.0f} Hz)"
+                f"Observed rate vs. separation ({self._channel_label(channel_count)}, pulser={pulse_rate_hz:.0f} Hz)"
             )
             ax.set_xlabel("Pulse separation (ns)")
             ax.set_ylabel("Observed rate (events/s)")
@@ -146,7 +165,7 @@ class DeadtimeAnalysis:
                     sorted_df["separation_ns"],
                     sorted_df["observed_rate_hz"],
                     marker="o",
-                    label=f"{int(channel_count)} channels",
+                    label=self._channel_label(channel_count),
                 )
             apply_rate_guides(ax, thresholds)
             ax.set_xscale("log", base=2)
@@ -183,6 +202,7 @@ class DeadtimeAnalysis:
                     marker="o",
                     linewidth=1.8,
                     color=color,
+                    # Keep legend tight; annotate 32-channel control runs on the figure.
                     label=f"{int(channel_count)} ch @ {pulse_rate:.0f}Hz",
                 )
         ax.set_xlabel("Capture windows")
@@ -191,6 +211,7 @@ class DeadtimeAnalysis:
         set_log2_with_decade_ticks(ax, "y", unit="µs")
         ax.set_title("Converged deadtime vs. capture windows (axes log2; y ticks in µs, log10 decades)")
         ax.grid(True, linestyle="--", alpha=0.5)
+        self._annotate_no_signal_channel_runs(ax)
         dedup_legend(ax, title="Channel / pulser")
         plt.show()
 
@@ -224,6 +245,7 @@ class DeadtimeAnalysis:
         set_log2_with_decade_ticks(ax, "y", unit="µs")
         ax.set_title("Converged deadtime vs. active channels (axes log2; y ticks in µs, log10 decades)")
         ax.grid(True, linestyle="--", alpha=0.5)
+        self._annotate_no_signal_channel_runs(ax)
         dedup_legend(ax, title="Windows / pulser")
         plt.show()
 
@@ -247,6 +269,7 @@ class DeadtimeAnalysis:
                 if sorted_df.empty:
                     continue
                 color = palette.get(channel_count, f"C{idx}")
+                # Keep legend concise; annotate 32-channel control runs on the figure itself.
                 label = f"{int(channel_count)} ch @ {pulse_rate:.0f}Hz"
                 x_vals = (sorted_df["windows"] * 32).to_numpy(dtype=float)
                 y_vals = (sorted_df["min_double_deadtime_ns"] / 1000.0).to_numpy(dtype=float)
@@ -261,16 +284,6 @@ class DeadtimeAnalysis:
                 )
                 if sorted_df["windows"].nunique() > 1:
                     slope, intercept = np.polyfit(x_vals, y_vals, 1)
-                    x_fit = np.array([x_vals.min(), x_vals.max()])
-                    y_fit = slope * x_fit + intercept
-                    ax.plot(
-                        x_fit,
-                        y_fit,
-                        color=color,
-                        linestyle="--",
-                        linewidth=1.2,
-                        alpha=0.8,
-                    )
                     fit_lines.append((label, slope, intercept))
         ax.set_xlabel("Capture samples (windows × 32)")
         ax.set_ylabel("Minimum separation with double response (µs)")
@@ -278,6 +291,7 @@ class DeadtimeAnalysis:
         set_log2_with_decade_ticks(ax, "y", unit="µs")
         ax.set_title("Minimum double-response separation vs. capture samples (axes log2; y ticks µs decades)")
         ax.grid(True, linestyle="--", alpha=0.5)
+        self._annotate_no_signal_channel_runs(ax)
         dedup_legend(ax, title="Channel / pulser")
         plt.show()
         if print_fits:
@@ -322,16 +336,6 @@ class DeadtimeAnalysis:
                 )
                 if sorted_df["channel_count"].nunique() > 1:
                     slope, intercept = np.polyfit(x_vals, y_vals, 1)
-                    x_fit = np.array([x_vals.min(), x_vals.max()])
-                    y_fit = slope * x_fit + intercept
-                    ax.plot(
-                        x_fit,
-                        y_fit,
-                        color=color,
-                        linestyle="--",
-                        linewidth=1.2,
-                        alpha=0.8,
-                    )
                     fit_lines.append((label, slope, intercept))
         ax.set_xlabel("Active channels")
         ax.set_ylabel("Minimum separation with double response (µs)")
@@ -339,6 +343,7 @@ class DeadtimeAnalysis:
         set_log2_with_decade_ticks(ax, "y", unit="µs")
         ax.set_title("Minimum double-response separation vs. active channels (axes log2; y ticks µs decades)")
         ax.grid(True, linestyle="--", alpha=0.5)
+        self._annotate_no_signal_channel_runs(ax)
         dedup_legend(ax, title="Windows / pulser")
         plt.show()
         if print_fits:
@@ -372,7 +377,7 @@ class DeadtimeAnalysis:
                 )
             ax.set_xscale("log", base=2)
             ax.set_title(
-                f"Tertiary outcome vs. separation (channels={int(channel_count)}, pulser={pulse_rate_hz:.0f} Hz)"
+                f"Tertiary outcome vs. separation ({self._channel_label(channel_count)}, pulser={pulse_rate_hz:.0f} Hz)"
             )
             ax.set_xlabel("Pulse separation (ns)")
             ax.set_ylabel("Tertiary outcome")
@@ -401,7 +406,7 @@ class DeadtimeAnalysis:
                     sorted_df["separation_ns"],
                     y_vals,
                     marker="o",
-                    label=f"{int(channel_count)} channels",
+                    label=self._channel_label(channel_count),
                 )
             ax.set_xscale("log", base=2)
             ax.set_xscale("log", base=2)
