@@ -80,21 +80,41 @@ class DeadtimeAnalysis:
         )
 
     def converged_table(self) -> pd.DataFrame:
-        return (
+        conv = (
             self.df.sort_values("search_iteration")
             .groupby(["pulse_rate_hz", "channel_count", "windows"], as_index=False)
             .tail(1)
-            .rename(columns={"separation_ns": "converged_deadtime_ns"})
+        )
+        return conv.rename(
+            columns={
+                "separation_ns": "converged_deadtime_ns",
+                "search_low_ns": "converged_lower_bound_ns",
+                "search_high_ns": "converged_upper_bound_ns",
+            }
         )
 
     def min_double_table(self) -> pd.DataFrame:
-        double_df = self.df[self.df["tertiary_mode"] == "double"]
-        return (
-            double_df.sort_values("separation_ns")
-            .groupby(["pulse_rate_hz", "channel_count", "windows"], as_index=False)
-            .first()
-            .rename(columns={"separation_ns": "min_double_deadtime_ns"})
-        )
+        rows = []
+        for (rate, channel_count, windows), group_df in self.df.groupby(
+            ["pulse_rate_hz", "channel_count", "windows"]
+        ):
+            double_df = group_df[group_df["tertiary_mode"] == "double"].sort_values("separation_ns")
+            if double_df.empty:
+                continue
+            min_row = double_df.iloc[0]
+            lower_single = (
+                group_df[group_df["tertiary_mode"] == "single"]["separation_ns"].max()
+            )
+            rows.append(
+                {
+                    "pulse_rate_hz": rate,
+                    "channel_count": channel_count,
+                    "windows": windows,
+                    "min_double_deadtime_ns": min_row["separation_ns"],
+                    "min_double_lower_bound_ns": lower_single,
+                }
+            )
+        return pd.DataFrame(rows)
 
     # ---- Rate plots ------------------------------------------------------ #
     def plot_rate_vs_separation_by_channels(
@@ -196,6 +216,8 @@ class DeadtimeAnalysis:
             for channel_count, channel_df in subset.groupby("channel_count"):
                 sorted_df = channel_df.sort_values("windows")
                 color = palette.get(channel_count, f"C{idx}")
+                lower = sorted_df["converged_lower_bound_ns"] / 1000.0
+                upper = sorted_df["converged_upper_bound_ns"] / 1000.0
                 ax.plot(
                     sorted_df["windows"],
                     sorted_df["converged_deadtime_ns"] / 1000.0,
@@ -205,6 +227,16 @@ class DeadtimeAnalysis:
                     # Keep legend tight; annotate 32-channel control runs on the figure.
                     label=f"{int(channel_count)} ch @ {pulse_rate:.0f}Hz",
                 )
+                mask = ~(lower.isna() | upper.isna())
+                if mask.any():
+                    ax.fill_between(
+                        sorted_df["windows"][mask],
+                        lower[mask],
+                        upper[mask],
+                        color=color,
+                        alpha=0.12,
+                        linewidth=0,
+                    )
         ax.set_xlabel("Capture windows")
         ax.set_ylabel("Converged deadtime (µs)")
         ax.set_xscale("log", base=2)
@@ -231,6 +263,8 @@ class DeadtimeAnalysis:
             for windows, window_df in subset.groupby("windows"):
                 sorted_df = window_df.sort_values("channel_count")
                 color = palette.get(windows, f"C{idx}")
+                lower = sorted_df["converged_lower_bound_ns"] / 1000.0
+                upper = sorted_df["converged_upper_bound_ns"] / 1000.0
                 ax.plot(
                     sorted_df["channel_count"],
                     sorted_df["converged_deadtime_ns"] / 1000.0,
@@ -239,6 +273,16 @@ class DeadtimeAnalysis:
                     color=color,
                     label=f"{int(windows)} win @ {pulse_rate:.0f}Hz",
                 )
+                mask = ~(lower.isna() | upper.isna())
+                if mask.any():
+                    ax.fill_between(
+                        sorted_df["channel_count"][mask],
+                        lower[mask],
+                        upper[mask],
+                        color=color,
+                        alpha=0.12,
+                        linewidth=0,
+                    )
         ax.set_xlabel("Active channels")
         ax.set_ylabel("Converged deadtime (µs)")
         ax.set_xscale("log", base=2)
@@ -273,6 +317,8 @@ class DeadtimeAnalysis:
                 label = f"{int(channel_count)} ch @ {pulse_rate:.0f}Hz"
                 x_vals = (sorted_df["windows"] * 32).to_numpy(dtype=float)
                 y_vals = (sorted_df["min_double_deadtime_ns"] / 1000.0).to_numpy(dtype=float)
+                lower = sorted_df["min_double_lower_bound_ns"] / 1000.0
+                mask = ~lower.isna()
                 ax.plot(
                     x_vals,
                     y_vals,
@@ -282,6 +328,15 @@ class DeadtimeAnalysis:
                     label=label,
                     alpha=0.8,
                 )
+                if mask.any():
+                    ax.fill_between(
+                        x_vals[mask],
+                        lower.to_numpy(dtype=float)[mask],
+                        y_vals[mask],
+                        color=color,
+                        alpha=0.12,
+                        linewidth=0,
+                    )
                 if sorted_df["windows"].nunique() > 1:
                     slope, intercept = np.polyfit(x_vals, y_vals, 1)
                     fit_lines.append((label, slope, intercept))
@@ -325,6 +380,8 @@ class DeadtimeAnalysis:
                 label = f"{int(windows)} win @ {pulse_rate:.0f}Hz"
                 x_vals = sorted_df["channel_count"].to_numpy(dtype=float)
                 y_vals = (sorted_df["min_double_deadtime_ns"] / 1000.0).to_numpy(dtype=float)
+                lower = sorted_df["min_double_lower_bound_ns"] / 1000.0
+                mask = ~lower.isna()
                 ax.plot(
                     x_vals,
                     y_vals,
@@ -334,6 +391,15 @@ class DeadtimeAnalysis:
                     label=label,
                     alpha=0.8,
                 )
+                if mask.any():
+                    ax.fill_between(
+                        x_vals[mask],
+                        lower.to_numpy(dtype=float)[mask],
+                        y_vals[mask],
+                        color=color,
+                        alpha=0.12,
+                        linewidth=0,
+                    )
                 if sorted_df["channel_count"].nunique() > 1:
                     slope, intercept = np.polyfit(x_vals, y_vals, 1)
                     fit_lines.append((label, slope, intercept))
