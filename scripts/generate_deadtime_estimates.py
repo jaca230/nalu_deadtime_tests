@@ -1,158 +1,145 @@
-#!/usr/bin/env python3
-"""Export minimum double-response separations for 10 Hz runs as JSON."""
-
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Optional
 
 import pandas as pd
 
+# Allow running as a script without installing the package
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT / "src"))
+SRC = ROOT / "src"
+import sys
 
+sys.path.append(str(SRC))
 from deadtime_analysis import DeadtimeAnalysis  # noqa: E402
 
-DEFAULT_INPUTS: Sequence[Path] = [
-    ROOT / "data" / "double_pulse_deadtime-11-19-25.jsonl",
-    ROOT / "data" / "double_pulse_deadtime-11-20-25.jsonl",
-    ROOT / "data" / "double_pulse_deadtime-11-21-25.jsonl",
-    ROOT / "data" / "double_pulse_deadtime-11-22-25.jsonl",
+
+# Default to the precombined dataset (includes 3-pulse filter for 12-14-25).
+DEFAULT_DATA_FILES = [
+    ROOT / "data" / "combined_deadtime.jsonl",
 ]
-DEFAULT_OUTPUT = ROOT / "data" / "estimated_deadtime_10hz.json"
-DEFAULT_PULSE_RATE = 10.0
-WINDOWS = [1, 2, 4, 8, 16, 32, 61]
-CHANNELS = [1, 2, 4, 8, 16]
 
 
-def _load_analysis(paths: Iterable[Path]) -> DeadtimeAnalysis:
-    string_paths = [str(p) for p in paths]
-    return DeadtimeAnalysis.from_jsonl(string_paths)
+def _to_int(val: Optional[float]) -> Optional[int]:
+    if pd.isna(val):
+        return None
+    return int(val)
 
 
-def _build_records(analysis: DeadtimeAnalysis, pulse_rate_hz: float) -> List[dict]:
-    df = analysis.df
-    min_double = analysis.min_double_table()
-    converged = analysis.converged_table()
-    records: List[dict] = []
-    for channel_count in CHANNELS:
-        for windows in WINDOWS:
-            combo_mask = (
-                (df["pulse_rate_hz"] == pulse_rate_hz)
-                & (df["channel_count"] == channel_count)
-                & (df["windows"] == windows)
-            )
-            combo_df = df[combo_mask]
-            conv_row = converged[
-                (converged["pulse_rate_hz"] == pulse_rate_hz)
-                & (converged["channel_count"] == channel_count)
-                & (converged["windows"] == windows)
-            ]
-            if not conv_row.empty:
-                conv_ns_val = conv_row.iloc[0]["converged_deadtime_ns"]
-                conv_low_val = conv_row.iloc[0]["converged_lower_bound_ns"]
-                conv_high_val = conv_row.iloc[0]["converged_upper_bound_ns"]
-                conv_ns = int(conv_ns_val) if pd.notna(conv_ns_val) else None
-                conv_low = int(conv_low_val) if pd.notna(conv_low_val) else None
-                conv_high = int(conv_high_val) if pd.notna(conv_high_val) else None
-            else:
-                conv_ns = conv_low = conv_high = None
-
-            record = {
-                "pulse_rate_hz": pulse_rate_hz,
-                "channel_count": channel_count,
-                "windows": windows,
-                "tested_max_separation_ns": int(combo_df["separation_ns"].max()) if not combo_df.empty else None,
-                "converged_deadtime_ns": conv_ns,
-                "converged_deadtime_us": round(conv_ns / 1000.0, 3) if conv_ns is not None else None,
-                "converged_lower_bound_ns": conv_low,
-                "converged_upper_bound_ns": conv_high,
-                "converged_lower_bound_us": round(conv_low / 1000.0, 3) if conv_low is not None else None,
-                "converged_upper_bound_us": round(conv_high / 1000.0, 3) if conv_high is not None else None,
-                "min_double_response_ns": None,
-                "min_double_response_us": None,
-                "min_double_lower_bound_ns": None,
-                "min_double_lower_bound_us": None,
-                "double_response_observed": False,
-                "note": None,
-            }
-            if combo_df.empty:
-                record["note"] = "No records found for this combination in the source files."
-            else:
-                min_row = min_double[
-                    (min_double["pulse_rate_hz"] == pulse_rate_hz)
-                    & (min_double["channel_count"] == channel_count)
-                    & (min_double["windows"] == windows)
-                ]
-                if min_row.empty:
-                    record["note"] = "Double-response threshold never crossed in provided runs."
-                else:
-                    min_sep_ns = int(min_row.iloc[0]["min_double_deadtime_ns"])
-                    lower_ns = min_row.iloc[0]["min_double_lower_bound_ns"]
-                    record.update(
-                        {
-                            "min_double_response_ns": min_sep_ns,
-                            "min_double_response_us": round(min_sep_ns / 1000.0, 3),
-                            "min_double_lower_bound_ns": int(lower_ns) if pd.notna(lower_ns) else None,
-                            "min_double_lower_bound_us": round(lower_ns / 1000.0, 3)
-                            if pd.notna(lower_ns)
-                            else None,
-                            "double_response_observed": True,
-                            "note": None,
-                        }
-                    )
-            records.append(record)
-    return records
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate a JSON list of minimum double-response separations for 10 Hz runs.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+def _row_to_estimate(
+    rate: float,
+    channel_count: float,
+    windows: float,
+    num_pulses: Optional[float],
+    group: pd.DataFrame,
+    converged_row: Optional[pd.Series],
+    min_double_row: Optional[pd.Series],
+) -> dict:
+    tested_max = float(group["separation_ns"].max())
+    conv_deadtime = (
+        float(converged_row["converged_deadtime_ns"]) if converged_row is not None else None
     )
+    conv_lower = (
+        float(converged_row["converged_lower_bound_ns"]) if converged_row is not None else None
+    )
+    conv_upper = (
+        float(converged_row["converged_upper_bound_ns"]) if converged_row is not None else None
+    )
+    min_all = float(min_double_row["min_double_deadtime_ns"]) if min_double_row is not None else None
+    min_all_lower = (
+        float(min_double_row["min_double_lower_bound_ns"]) if min_double_row is not None else None
+    )
+    return {
+        "pulse_rate_hz": float(rate),
+        "channel_count": _to_int(channel_count),
+        "windows": _to_int(windows),
+        "num_pulses": _to_int(num_pulses),
+        "tested_max_separation_ns": float(tested_max),
+        "converged_deadtime_ns": conv_deadtime,
+        "converged_deadtime_us": conv_deadtime / 1000.0 if conv_deadtime is not None else None,
+        "converged_lower_bound_ns": conv_lower,
+        "converged_upper_bound_ns": conv_upper,
+        "converged_lower_bound_us": conv_lower / 1000.0 if conv_lower is not None else None,
+        "converged_upper_bound_us": conv_upper / 1000.0 if conv_upper is not None else None,
+        "min_all_pulses_response_ns": min_all,
+        "min_all_pulses_response_us": min_all / 1000.0 if min_all is not None else None,
+        "min_all_pulses_lower_bound_ns": min_all_lower,
+        "min_all_pulses_lower_bound_us": (
+            min_all_lower / 1000.0 if min_all_lower is not None else None
+        ),
+        "all_pulses_observed": min_double_row is not None,
+        "note": None,
+    }
+
+
+def generate_estimates(analysis: DeadtimeAnalysis) -> List[dict]:
+    df = analysis.df
+    conv = analysis.converged_table()
+    min_double = analysis.min_double_table()
+    results: List[dict] = []
+    for (rate, channel_count, windows, num_pulses), group_df in df.groupby(
+        ["pulse_rate_hz", "channel_count", "windows", "num_pulses"]
+    ):
+        conv_row = conv[
+            (conv["pulse_rate_hz"] == rate)
+            & (conv["channel_count"] == channel_count)
+            & (conv["windows"] == windows)
+            & (conv["num_pulses"] == num_pulses)
+        ]
+        conv_row = conv_row.iloc[0] if not conv_row.empty else None
+        md_row = min_double[
+            (min_double["pulse_rate_hz"] == rate)
+            & (min_double["channel_count"] == channel_count)
+            & (min_double["windows"] == windows)
+            & (min_double["num_pulses"] == num_pulses)
+        ]
+        md_row = md_row.iloc[0] if not md_row.empty else None
+        results.append(
+            _row_to_estimate(
+                rate=rate,
+                channel_count=channel_count,
+                windows=windows,
+                num_pulses=num_pulses,
+                group=group_df,
+                converged_row=conv_row,
+                min_double_row=md_row,
+            )
+        )
+    return sorted(
+        results,
+        key=lambda r: (
+            r["pulse_rate_hz"],
+            r["num_pulses"] if r["num_pulses"] is not None else 0,
+            r["channel_count"],
+            r["windows"],
+        ),
+    )
+
+
+def main(argv: Optional[Iterable[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Generate deadtime estimates JSON.")
     parser.add_argument(
-        "--inputs",
+        "--data-files",
         nargs="+",
         type=Path,
-        default=None,
-        help="JSONL input files to scan (defaults to all bundled runs).",
+        default=DEFAULT_DATA_FILES,
+        help="JSONL data files to include",
     )
     parser.add_argument(
-        "--pulse-rate",
-        type=float,
-        default=DEFAULT_PULSE_RATE,
-        help="Pulse repetition rate to export.",
-    )
-    parser.add_argument(
-        "-o",
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help="Destination JSON file (list of dicts).",
+        default=ROOT / "data" / "estimated_deadtime_all.json",
+        help="Path to write aggregated estimates JSON",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
 
-
-def main() -> None:
-    args = parse_args()
-    inputs = args.inputs or DEFAULT_INPUTS
-    missing = [p for p in inputs if not p.exists()]
-    if missing:
-        missing_str = ", ".join(str(p) for p in missing)
-        raise FileNotFoundError(f"Missing input file(s): {missing_str}")
-
-    analysis = _load_analysis(inputs)
-    records = _build_records(analysis, pulse_rate_hz=args.pulse_rate)
-
+    analysis = DeadtimeAnalysis.from_jsonl([str(p) for p in args.data_files])
+    estimates = generate_estimates(analysis)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w") as fh:
-        json.dump(records, fh, indent=2)
-        fh.write("\n")
-
-    print(f"Wrote {len(records)} records to {args.output}")
+    args.output.write_text(json.dumps(estimates, indent=2))
+    print(f"Wrote {len(estimates)} estimates to {args.output}")
 
 
 if __name__ == "__main__":

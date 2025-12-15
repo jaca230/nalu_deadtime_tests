@@ -1,27 +1,49 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
-from .constants import DEFAULT_DOUBLE_FACTOR, DEFAULT_SINGLE_FACTOR
 from .loader import _get_active_channel_count
 
 
-def _classify_rate(rate: float, single_threshold: float, double_threshold: float) -> str:
-    if pd.isna(rate) or pd.isna(single_threshold) or pd.isna(double_threshold):
-        return "mixed"
-    if rate < single_threshold:
-        return "single"
-    if rate > double_threshold:
-        return "double"
-    return "mixed"
+def _classify_pulse_region(
+    observed_rate: Optional[float], pulse_rate_hz: Optional[float], num_pulses: Optional[int]
+) -> Tuple[str, Optional[int], Optional[int], Optional[int]]:
+    """
+    Classify response using 25% bands around each integer pulse multiple.
+
+    Returns:
+        mode_label: human-readable label
+        pulse_region: k if in pure k-pulse region else None
+        mixed_lower: lower pulse count if in a mixed band else None
+        mixed_upper: upper pulse count if in a mixed band else None
+    """
+    if observed_rate is None or pulse_rate_hz is None or num_pulses is None:
+        return "mixed", None, None, None
+    norm = observed_rate / pulse_rate_hz
+    # Pure regions first
+    for k in range(1, int(num_pulses) + 1):
+        lower = max(0, k - 0.25)
+        upper = k + 0.25
+        if lower <= norm <= upper:
+            label = "single" if k == 1 else ("all" if k == num_pulses else f"{k}-pulse")
+            return label, k, None, None
+    # Mixed regions between k and k+1
+    for k in range(1, int(num_pulses)):
+        lower = k + 0.25
+        upper = k + 0.75
+        if lower <= norm <= upper:
+            return "mixed", None, k, k + 1
+    # Above the top band: treat as all pulses
+    label = "all" if num_pulses > 1 else "single"
+    return label, num_pulses, None, None
 
 
 def build_dataframe(
     records: List[dict],
-    single_factor: float = DEFAULT_SINGLE_FACTOR,
-    double_factor: float = DEFAULT_DOUBLE_FACTOR,
+    single_factor: float = 1.2,  # retained for API compatibility; unused in new logic
+    double_factor: float = 1.8,  # retained for API compatibility; unused in new logic
 ) -> pd.DataFrame:
     """Flatten raw JSON records and derive classification fields."""
     rows = []
@@ -29,53 +51,67 @@ def build_dataframe(
         capture = entry.get("capture_settings", {})
         raw_capture = capture.get("raw", {})
         search_meta = entry.get("search", {})
-        double_pulse = entry.get("double_pulse", {})
+        pulse_meta = entry.get("pulse_sequence") or entry.get("double_pulse") or {}
         observed = entry.get("observed_rates", {})
 
-        pulse_rate_hz = double_pulse.get("repetition_rate_hz")
-        target_ratio = search_meta.get("target_ratio")
-        single_threshold = (
-            pulse_rate_hz * single_factor if pulse_rate_hz is not None else None
+        pulse_rate_hz = pulse_meta.get("repetition_rate_hz")
+        num_pulses = (
+            pulse_meta.get("num_pulses")
+            or search_meta.get("num_pulses")
+            or (2 if entry.get("double_pulse") else None)
         )
-        double_threshold = (
-            pulse_rate_hz * double_factor if pulse_rate_hz is not None else None
+        expected_rate_hz = observed.get("expected_events_per_second")
+        expected_pulses = (
+            expected_rate_hz / pulse_rate_hz if pulse_rate_hz and expected_rate_hz else None
         )
-        target_line = (
-            pulse_rate_hz * target_ratio
-            if pulse_rate_hz is not None and target_ratio is not None
+        observed_rate_hz = observed.get("events_per_second")
+        observed_ratio_vs_pulse = (
+            observed_rate_hz / pulse_rate_hz if pulse_rate_hz and observed_rate_hz else None
+        )
+        observed_ratio_vs_expected = (
+            observed_rate_hz / expected_rate_hz
+            if expected_rate_hz and observed_rate_hz
             else None
+        )
+        target_ratio = search_meta.get("target_ratio")
+        target_line = (
+            pulse_rate_hz * num_pulses * target_ratio
+            if pulse_rate_hz and num_pulses and target_ratio is not None
+            else (pulse_rate_hz * target_ratio if pulse_rate_hz and target_ratio is not None else None)
+        )
+
+        mode_label, pulse_region, mixed_lower, mixed_upper = _classify_pulse_region(
+            observed_rate_hz, pulse_rate_hz, num_pulses
         )
 
         rows.append(
             {
                 "timestamp": pd.to_datetime(entry.get("timestamp")),
                 "run_number": entry.get("run_number"),
-                "separation_ns": double_pulse.get("separation_ns"),
+                "separation_ns": pulse_meta.get("separation_ns"),
                 "pulse_rate_hz": pulse_rate_hz,
+                "num_pulses": num_pulses,
                 "target_ratio": target_ratio,
                 "windows": capture.get("windows", raw_capture.get("windows")),
                 "channel_count": _get_active_channel_count(entry),
-                "observed_rate_hz": observed.get("events_per_second"),
-                "expected_rate_hz": observed.get("expected_events_per_second"),
+                "observed_rate_hz": observed_rate_hz,
+                "expected_rate_hz": expected_rate_hz,
                 "deadtime_fraction": observed.get("deadtime_fraction"),
                 "search_iteration": search_meta.get("iteration"),
                 "search_combo_index": search_meta.get("combo_index"),
                 "search_low_ns": search_meta.get("low_ns"),
                 "search_high_ns": search_meta.get("high_ns"),
-                "single_threshold": single_threshold,
-                "double_threshold": double_threshold,
                 "target_line": target_line,
+                "expected_pulses": expected_pulses,
+                "observed_ratio_vs_pulse_rate": observed_ratio_vs_pulse,
+                "observed_ratio_vs_expected": observed_ratio_vs_expected,
+                "pulse_region": pulse_region,
+                "mixed_lower_pulses": mixed_lower,
+                "mixed_upper_pulses": mixed_upper,
+                "tertiary_mode": mode_label,
             }
         )
 
     df = pd.DataFrame(rows)
     df = df.dropna(subset=["windows", "channel_count", "pulse_rate_hz"])
-    df["tertiary_mode"] = df.apply(
-        lambda row: _classify_rate(
-            row.get("observed_rate_hz"),
-            row.get("single_threshold"),
-            row.get("double_threshold"),
-        ),
-        axis=1,
-    )
     return df.sort_values(["pulse_rate_hz", "separation_ns"])

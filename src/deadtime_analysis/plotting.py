@@ -10,33 +10,112 @@ from matplotlib import colors as mcolors
 
 from .models import ClassificationThresholds
 
-Region = Tuple[str, float, float, str]  # label, lower, upper, color
+Region = Tuple[str, float, float, str, Optional[str]]  # label, lower, upper, color, hatch
 
 
-def apply_rate_guides(ax: plt.Axes, thresholds: ClassificationThresholds) -> None:
-    """Overlay shaded single/mixed/double bands and the binary-search target line."""
+def apply_rate_guides(
+    ax: plt.Axes, thresholds: ClassificationThresholds, *, high_label: Optional[str] = None
+) -> None:
+    """Overlay shaded single/mixed/upper bands and the binary-search target line."""
     single_thr = thresholds.single_threshold
     double_thr = thresholds.double_threshold
     if single_thr and double_thr:
+        label_high = high_label
+        if label_high is None:
+            if thresholds.num_pulses and thresholds.num_pulses > 2:
+                label_high = f"{int(thresholds.num_pulses)}-pulse region"
+            else:
+                label_high = "N-pulse region"
         regions: List[Region] = [
-            ("Single region", 0, single_thr, "#d73027"),
-            ("Mixed region", single_thr, double_thr, "#fdae61"),
+            ("Single region", 0, single_thr, "#d73027", None),
+            ("Mixed region", single_thr, double_thr, "#fdae61", "//"),
         ]
         top = ax.get_ylim()[1]
         if top <= double_thr:
             top = double_thr * 1.1
-        regions.append(("Double region", double_thr, top, "#1a9850"))
-        for label, lower, upper, color in regions:
-            ax.axhspan(lower, upper, color=color, alpha=0.08, label=label)
+        regions.append((label_high, double_thr, top, "#1a9850", None))
+        for label, lower, upper, color, hatch in regions:
+            ax.axhspan(lower, upper, color=color, alpha=0.08, label=label, hatch=hatch)
 
-    if thresholds.target_line is not None:
+        if thresholds.target_line is not None:
+            ax.axhline(
+                thresholds.target_line,
+                color="k",
+                linestyle="--",
+                linewidth=1.0,
+                label=f"Binary-search target ({thresholds.target_line:.1f} Hz)",
+            )
+
+
+def pulse_region_spans(pulse_rate_hz: float, num_pulses: int) -> List[Region]:
+    """
+    Build pulse/mixed regions with 25% bands around each integer pulse multiple.
+
+    Pure k-pulse region: [(k-0.25)f, (k+0.25)f]
+    Mixed k-(k+1): [(k+0.25)f, (k+0.75)f]
+    """
+    regions: List[Region] = []
+    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+
+    def _shade(base: str, factor: float) -> str:
+        rgb = np.array(mcolors.to_rgb(base))
+        rgb = rgb * factor + (1 - factor)
+        return mcolors.to_hex(rgb)
+
+    def _color(idx: int) -> str:
+        if colors:
+            return colors[idx % len(colors)]
+        return f"C{idx}"
+
+    # Pure pulse regions
+    for k in range(1, num_pulses + 1):
+        lower = max(0.0, (k - 0.25) * pulse_rate_hz)
+        upper = (k + 0.25) * pulse_rate_hz
+        base = _color(k - 1)
+        regions.append((f"{k}-pulse region", lower, upper, base, None))
+        if k < num_pulses:
+            mix_lower = (k + 0.25) * pulse_rate_hz
+            mix_upper = (k + 0.75) * pulse_rate_hz
+            regions.append((f"Mixed {k}-{k+1}", mix_lower, mix_upper, _shade(base, 0.6), "//"))
+    # Top open region to cover values beyond the last band
+    top_lower = (num_pulses + 0.25) * pulse_rate_hz
+    last_base = _color(num_pulses - 1)
+    regions.append(
+        (
+            f"{num_pulses}-pulse+ region",
+            top_lower,
+            top_lower * 1.2,
+            _shade(last_base, 0.85),
+            "..",
+        )
+    )
+    return regions
+
+
+def apply_pulse_regions(
+    ax: plt.Axes,
+    pulse_rate_hz: float,
+    num_pulses: int,
+    target_line: Optional[float] = None,
+    *,
+    alpha: float = 0.08,
+) -> None:
+    """Overlay pulse/mixed regions for n-pulse sequences using 25% tolerance bands."""
+    spans = pulse_region_spans(pulse_rate_hz, num_pulses)
+    ylim_top = ax.get_ylim()[1]
+    for label, lower, upper, color, hatch in spans:
+        if upper > ylim_top:
+            ylim_top = upper * 1.05
+        ax.axhspan(lower, upper, color=color, alpha=alpha, label=label, hatch=hatch)
+    if target_line is not None:
         ax.axhline(
-            thresholds.target_line,
+            target_line,
             color="k",
             linestyle="--",
             linewidth=1.0,
-            label=f"Binary-search target ({thresholds.target_line:.1f} Hz)",
+            label=f"Binary-search target ({target_line:.1f} Hz)",
         )
+    ax.set_ylim(ax.get_ylim()[0], ylim_top)
 
 
 def dedup_legend(
