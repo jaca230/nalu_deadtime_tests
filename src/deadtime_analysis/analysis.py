@@ -65,16 +65,24 @@ class DeadtimeAnalysis:
             return "not all pulses seen"
         return "sometimes all pulses seen"
 
-    def _annotate_no_signal_channel_runs(self, ax: plt.Axes) -> None:
+    def _annotate_no_signal_channel_runs(
+        self, 
+        ax: plt.Axes, 
+        show: bool = True,
+        position: Tuple[float, float] = (0.01, 0.02),
+        va: str = "bottom"
+    ) -> None:
+        if not show:
+            return
         note = "32-channel runs had no injected signals on channels 16-31 (control)."
         ax.text(
-            0.01,
-            0.02,
+            position[0],
+            position[1],
             note,
             transform=ax.transAxes,
             fontsize=9,
             ha="left",
-            va="bottom",
+            va=va,
             bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.65},
         )
 
@@ -153,6 +161,13 @@ class DeadtimeAnalysis:
         num_pulses: Optional[int] = None,
         highlight_separations_ns: Optional[List[float]] = None,
         highlight_text: Optional[str] = None,
+        show_stars: bool = True,
+        show_vertical_bounds: bool = True,
+        show_notes: bool = True,
+        deadtime_range_ns: Optional[Tuple[float, float]] = None,
+        deadtime_range_text: Optional[str] = None,
+        y_min: Optional[float] = None,
+        y_max: Optional[float] = None,
     ) -> None:
         data = self.subset(pulse_rate_hz, num_pulses=num_pulses)
         if data.empty:
@@ -165,7 +180,10 @@ class DeadtimeAnalysis:
             y_min_obs = channel_df["observed_rate_hz"].min() * 0.95
             y_max_obs = channel_df["observed_rate_hz"].max() * 1.05
             ax.set_xlim(x_min, x_max)
-            ax.set_ylim(y_min_obs, y_max_obs * 1.1)
+            # Use custom y limits if provided, otherwise use auto
+            y_min_use = y_min if y_min is not None else y_min_obs
+            y_max_use = y_max if y_max is not None else y_max_obs * 1.1
+            ax.set_ylim(y_min_use, y_max_use)
             for (windows, pulse_count), window_df in channel_df.groupby(["windows", "num_pulses"]):
                 sorted_df = window_df.sort_values("separation_ns")
                 ax.plot(
@@ -174,7 +192,16 @@ class DeadtimeAnalysis:
                     marker="o",
                     label=f"{int(windows)} windows",
                 )
-            if highlight_separations_ns:
+            # Vertical highlight region for deadtime range
+            if show_vertical_bounds and deadtime_range_ns and len(deadtime_range_ns) == 2:
+                lb, resp = deadtime_range_ns
+                if lb is not None and resp is not None:
+                    ax.axvspan(lb, resp, alpha=0.2, color='yellow', zorder=0)
+                    # Add dashed vertical lines at boundaries
+                    ax.axvline(lb, color='black', linestyle='--', linewidth=1.5, zorder=4)
+                    ax.axvline(resp, color='black', linestyle='--', linewidth=1.5, zorder=4)
+            
+            if show_stars and highlight_separations_ns:
                 for sep in highlight_separations_ns:
                     y_vals = channel_df[channel_df["separation_ns"] == sep]["observed_rate_hz"]
                     if y_vals.empty:
@@ -188,19 +215,38 @@ class DeadtimeAnalysis:
                         zorder=5,
                         label=None,
                     )
-            if highlight_text:
+            
+            # Notes in top left
+            notes_y_offset = 0.98
+            if show_notes and deadtime_range_text:
                 ax.text(
-                    0.02,
-                    0.95,
-                    highlight_text,
+                    0.01,
+                    notes_y_offset,
+                    deadtime_range_text,
                     transform=ax.transAxes,
                     ha="left",
                     va="top",
-                    fontsize=10,
-                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.7},
+                    fontsize=9,
+                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.65},
                 )
+                notes_y_offset -= 0.05
+            
+            if show_notes:
+                self._annotate_no_signal_channel_runs(
+                    ax, 
+                    show=True, 
+                    position=(0.01, notes_y_offset), 
+                    va="top"
+                )
+            
             if num_pulses:
                 apply_pulse_regions(ax, pulse_rate_hz, int(num_pulses), target_line=target_line)
+            # Re-apply custom y limits after apply_pulse_regions (which may have changed them)
+            if y_min is not None or y_max is not None:
+                current_ylim = ax.get_ylim()
+                y_min_final = y_min if y_min is not None else current_ylim[0]
+                y_max_final = y_max if y_max is not None else current_ylim[1]
+                ax.set_ylim(y_min_final, y_max_final)
             set_log2_with_decade_ticks(ax, "x", unit="ns")
             if num_pulses is not None:
                 pulse_note = f", {self._pulse_label(num_pulses)}"
@@ -216,7 +262,6 @@ class DeadtimeAnalysis:
             ax.set_ylabel("Observed rate (events/s)")
             ax.grid(True, linestyle="--", alpha=0.5)
             dedup_legend(ax, title="Capture windows")
-            self._annotate_no_signal_channel_runs(ax)
             plt.show()
 
     def plot_rate_vs_separation_by_windows(
@@ -225,6 +270,13 @@ class DeadtimeAnalysis:
         num_pulses: Optional[int] = None,
         highlight_separations_ns: Optional[List[float]] = None,
         highlight_text: Optional[str] = None,
+        show_stars: bool = True,
+        show_vertical_bounds: bool = True,
+        show_notes: bool = True,
+        deadtime_range_ns: Optional[Tuple[float, float]] = None,
+        deadtime_range_text: Optional[str] = None,
+        y_min: Optional[float] = None,
+        y_max: Optional[float] = None,
     ) -> None:
         data = self.subset(pulse_rate_hz, num_pulses=num_pulses)
         if data.empty:
@@ -237,7 +289,10 @@ class DeadtimeAnalysis:
             y_min_obs = window_df["observed_rate_hz"].min() * 0.95
             y_max_obs = window_df["observed_rate_hz"].max() * 1.05
             ax.set_xlim(x_min, x_max)
-            ax.set_ylim(y_min_obs, y_max_obs * 1.1)
+            # Use custom y limits if provided, otherwise use auto
+            y_min_use = y_min if y_min is not None else y_min_obs
+            y_max_use = y_max if y_max is not None else y_max_obs * 1.1
+            ax.set_ylim(y_min_use, y_max_use)
             for (channel_count, pulse_count), channel_df in window_df.groupby(
                 ["channel_count", "num_pulses"]
             ):
@@ -248,7 +303,16 @@ class DeadtimeAnalysis:
                     marker="o",
                     label=self._channel_label(channel_count),
                 )
-            if highlight_separations_ns:
+            # Vertical highlight region for deadtime range
+            if show_vertical_bounds and deadtime_range_ns and len(deadtime_range_ns) == 2:
+                lb, resp = deadtime_range_ns
+                if lb is not None and resp is not None:
+                    ax.axvspan(lb, resp, alpha=0.2, color='yellow', zorder=0)
+                    # Add dashed vertical lines at boundaries
+                    ax.axvline(lb, color='black', linestyle='--', linewidth=1.5, zorder=4)
+                    ax.axvline(resp, color='black', linestyle='--', linewidth=1.5, zorder=4)
+            
+            if show_stars and highlight_separations_ns:
                 for sep in highlight_separations_ns:
                     y_vals = window_df[window_df["separation_ns"] == sep]["observed_rate_hz"]
                     if y_vals.empty:
@@ -262,19 +326,38 @@ class DeadtimeAnalysis:
                         zorder=5,
                         label=None,
                     )
-            if highlight_text:
+            
+            # Notes in top left
+            notes_y_offset = 0.98
+            if show_notes and deadtime_range_text:
                 ax.text(
-                    0.02,
-                    0.95,
-                    highlight_text,
+                    0.01,
+                    notes_y_offset,
+                    deadtime_range_text,
                     transform=ax.transAxes,
                     ha="left",
                     va="top",
-                    fontsize=10,
-                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.7},
+                    fontsize=9,
+                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.65},
                 )
+                notes_y_offset -= 0.05
+            
+            if show_notes:
+                self._annotate_no_signal_channel_runs(
+                    ax, 
+                    show=True, 
+                    position=(0.01, notes_y_offset), 
+                    va="top"
+                )
+            
             if num_pulses:
                 apply_pulse_regions(ax, pulse_rate_hz, int(num_pulses), target_line=target_line)
+            # Re-apply custom y limits after apply_pulse_regions (which may have changed them)
+            if y_min is not None or y_max is not None:
+                current_ylim = ax.get_ylim()
+                y_min_final = y_min if y_min is not None else current_ylim[0]
+                y_max_final = y_max if y_max is not None else current_ylim[1]
+                ax.set_ylim(y_min_final, y_max_final)
             set_log2_with_decade_ticks(ax, "x", unit="ns")
             if num_pulses is not None:
                 pulse_note = f", {self._pulse_label(num_pulses)}"
@@ -290,7 +373,6 @@ class DeadtimeAnalysis:
             ax.set_ylabel("Observed rate (events/s)")
             ax.grid(True, linestyle="--", alpha=0.5)
             dedup_legend(ax, title="Active channels")
-            self._annotate_no_signal_channel_runs(ax)
             plt.show()
 
     # ---- Derived separation plots --------------------------------------- #
