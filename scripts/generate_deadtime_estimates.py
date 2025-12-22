@@ -36,6 +36,9 @@ def _row_to_estimate(
     group: pd.DataFrame,
     converged_row: Optional[pd.Series],
     min_double_row: Optional[pd.Series],
+    *,
+    channel_ratio_required: bool,
+    full_channels_required: bool,
 ) -> dict:
     tested_max = float(group["separation_ns"].max())
     conv_deadtime = (
@@ -56,6 +59,8 @@ def _row_to_estimate(
         "channel_count": _to_int(channel_count),
         "windows": _to_int(windows),
         "num_pulses": _to_int(num_pulses),
+        "channel_ratio_required": channel_ratio_required,
+        "full_channels_required": full_channels_required,
         "tested_max_separation_ns": float(tested_max),
         "converged_deadtime_ns": conv_deadtime,
         "converged_deadtime_us": conv_deadtime / 1000.0 if conv_deadtime is not None else None,
@@ -74,10 +79,18 @@ def _row_to_estimate(
     }
 
 
-def generate_estimates(analysis: DeadtimeAnalysis) -> List[dict]:
+def generate_estimates(
+    analysis: DeadtimeAnalysis,
+    *,
+    require_channel_ratio_pass: bool = False,
+    require_full_channels: bool = False,
+) -> List[dict]:
     df = analysis.df
     conv = analysis.converged_table()
-    min_double = analysis.min_double_table()
+    min_double = analysis.min_double_table(
+        require_channel_ratio_pass=require_channel_ratio_pass,
+        require_full_channels=require_full_channels,
+    )
     results: List[dict] = []
     for (rate, channel_count, windows, num_pulses), group_df in df.groupby(
         ["pulse_rate_hz", "channel_count", "windows", "num_pulses"]
@@ -105,6 +118,8 @@ def generate_estimates(analysis: DeadtimeAnalysis) -> List[dict]:
                 group=group_df,
                 converged_row=conv_row,
                 min_double_row=md_row,
+                channel_ratio_required=require_channel_ratio_pass,
+                full_channels_required=require_full_channels,
             )
         )
     return sorted(
@@ -133,10 +148,24 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         default=ROOT / "data" / "estimated_deadtime_all.json",
         help="Path to write aggregated estimates JSON",
     )
+    parser.add_argument(
+        "--require-channel-threshold",
+        action="store_true",
+        help="Require channel ratio to pass threshold when computing min-all-pulses response.",
+    )
+    parser.add_argument(
+        "--require-full-channels",
+        action="store_true",
+        help="Require all channels to be observed when computing min-all-pulses response.",
+    )
     args = parser.parse_args(argv)
 
     analysis = DeadtimeAnalysis.from_jsonl([str(p) for p in args.data_files])
-    estimates = generate_estimates(analysis)
+    estimates = generate_estimates(
+        analysis,
+        require_channel_ratio_pass=args.require_channel_threshold,
+        require_full_channels=args.require_full_channels,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(estimates, indent=2))
     print(f"Wrote {len(estimates)} estimates to {args.output}")

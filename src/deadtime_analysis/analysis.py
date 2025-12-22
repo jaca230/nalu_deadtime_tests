@@ -125,21 +125,40 @@ class DeadtimeAnalysis:
             }
         )
 
-    def min_double_table(self) -> pd.DataFrame:
+    def min_double_table(
+        self, require_channel_ratio_pass: bool = False, require_full_channels: bool = False
+    ) -> pd.DataFrame:
         rows = []
+        channel_gate_column = None
+        if require_full_channels:
+            channel_gate_column = "channel_full_pass"
+        elif require_channel_ratio_pass:
+            channel_gate_column = "channel_ratio_pass"
         for (rate, channel_count, windows, num_pulses), group_df in self.df.groupby(
             ["pulse_rate_hz", "channel_count", "windows", "num_pulses"]
         ):
             if pd.isna(num_pulses):
                 continue
-            target_region = group_df[group_df["pulse_region"] == num_pulses].sort_values(
-                "separation_ns"
-            )
+            target_region = group_df[group_df["pulse_region"] == num_pulses]
+            if channel_gate_column is not None:
+                target_region = target_region[target_region[channel_gate_column] == True]
+            target_region = target_region.sort_values("separation_ns")
             if target_region.empty:
                 continue
             min_row = target_region.iloc[0]
             prev_region = group_df[group_df["pulse_region"] == (num_pulses - 1)]
-            lower_prev = prev_region["separation_ns"].max() if not prev_region.empty else None
+            if channel_gate_column is not None:
+                lower_candidates = group_df[group_df["separation_ns"] < min_row["separation_ns"]]
+                lower_candidates = lower_candidates[
+                    (lower_candidates["pulse_region"] == (num_pulses - 1))
+                    | (lower_candidates[channel_gate_column] == False)
+                    | (lower_candidates[channel_gate_column].isna())
+                ]
+                lower_prev = (
+                    lower_candidates["separation_ns"].max() if not lower_candidates.empty else None
+                )
+            else:
+                lower_prev = prev_region["separation_ns"].max() if not prev_region.empty else None
             search_lower = min_row.get("search_low_ns")
             lower_bound = lower_prev if lower_prev is not None else search_lower
             rows.append(
@@ -166,6 +185,7 @@ class DeadtimeAnalysis:
         show_notes: bool = True,
         deadtime_range_ns: Optional[Tuple[float, float]] = None,
         deadtime_range_text: Optional[str] = None,
+        deadtime_estimate_ns: Optional[float] = None,
         y_min: Optional[float] = None,
         y_max: Optional[float] = None,
     ) -> None:
@@ -177,6 +197,9 @@ class DeadtimeAnalysis:
             fig, ax = plt.subplots(figsize=(10, 6))
             x_min = channel_df["separation_ns"].min() * 0.95
             x_max = channel_df["separation_ns"].max() * 1.05
+            if deadtime_estimate_ns is not None:
+                x_min = min(x_min, deadtime_estimate_ns * 0.95)
+                x_max = max(x_max, deadtime_estimate_ns * 1.05)
             y_min_obs = channel_df["observed_rate_hz"].min() * 0.95
             y_max_obs = channel_df["observed_rate_hz"].max() * 1.05
             ax.set_xlim(x_min, x_max)
@@ -200,6 +223,15 @@ class DeadtimeAnalysis:
                     # Add dashed vertical lines at boundaries
                     ax.axvline(lb, color='black', linestyle='--', linewidth=1.5, zorder=4)
                     ax.axvline(resp, color='black', linestyle='--', linewidth=1.5, zorder=4)
+            if deadtime_estimate_ns is not None:
+                ax.axvline(
+                    deadtime_estimate_ns,
+                    color="tab:red",
+                    linestyle=":",
+                    linewidth=2.0,
+                    zorder=4,
+                    label="Deadtime estimate",
+                )
             
             if show_stars and highlight_separations_ns:
                 for sep in highlight_separations_ns:
@@ -275,6 +307,7 @@ class DeadtimeAnalysis:
         show_notes: bool = True,
         deadtime_range_ns: Optional[Tuple[float, float]] = None,
         deadtime_range_text: Optional[str] = None,
+        deadtime_estimate_ns: Optional[float] = None,
         y_min: Optional[float] = None,
         y_max: Optional[float] = None,
     ) -> None:
@@ -286,6 +319,9 @@ class DeadtimeAnalysis:
             fig, ax = plt.subplots(figsize=(10, 6))
             x_min = window_df["separation_ns"].min() * 0.95
             x_max = window_df["separation_ns"].max() * 1.05
+            if deadtime_estimate_ns is not None:
+                x_min = min(x_min, deadtime_estimate_ns * 0.95)
+                x_max = max(x_max, deadtime_estimate_ns * 1.05)
             y_min_obs = window_df["observed_rate_hz"].min() * 0.95
             y_max_obs = window_df["observed_rate_hz"].max() * 1.05
             ax.set_xlim(x_min, x_max)
@@ -311,6 +347,15 @@ class DeadtimeAnalysis:
                     # Add dashed vertical lines at boundaries
                     ax.axvline(lb, color='black', linestyle='--', linewidth=1.5, zorder=4)
                     ax.axvline(resp, color='black', linestyle='--', linewidth=1.5, zorder=4)
+            if deadtime_estimate_ns is not None:
+                ax.axvline(
+                    deadtime_estimate_ns,
+                    color="tab:red",
+                    linestyle=":",
+                    linewidth=2.0,
+                    zorder=4,
+                    label="Deadtime estimate",
+                )
             
             if show_stars and highlight_separations_ns:
                 for sep in highlight_separations_ns:
@@ -371,6 +416,142 @@ class DeadtimeAnalysis:
             )
             ax.set_xlabel("Pulse separation (ns)")
             ax.set_ylabel("Observed rate (events/s)")
+            ax.grid(True, linestyle="--", alpha=0.5)
+            dedup_legend(ax, title="Active channels")
+            plt.show()
+
+    def plot_channels_per_event_vs_separation_by_channels(
+        self,
+        pulse_rate_hz: float,
+        num_pulses: Optional[int] = None,
+        show_expected: bool = True,
+        show_threshold: bool = True,
+        y_min: Optional[float] = None,
+        y_max: Optional[float] = None,
+    ) -> None:
+        data = self.subset(pulse_rate_hz, num_pulses=num_pulses)
+        data = data.dropna(subset=["observed_channels_per_event"])
+        if data.empty:
+            raise ValueError(f"No channel-rate data for pulse_rate_hz={pulse_rate_hz}")
+        for channel_count, channel_df in data.groupby("channel_count"):
+            fig, ax = plt.subplots(figsize=(10, 6))
+            x_min = channel_df["separation_ns"].min() * 0.95
+            x_max = channel_df["separation_ns"].max() * 1.05
+            y_min_obs = channel_df["observed_channels_per_event"].min() * 0.95
+            y_max_obs = channel_df["observed_channels_per_event"].max() * 1.05
+            ax.set_xlim(x_min, x_max)
+            y_min_use = y_min if y_min is not None else y_min_obs
+            y_max_use = y_max if y_max is not None else y_max_obs
+            ax.set_ylim(y_min_use, y_max_use)
+            for windows, window_df in channel_df.groupby("windows"):
+                sorted_df = window_df.sort_values("separation_ns")
+                ax.plot(
+                    sorted_df["separation_ns"],
+                    sorted_df["observed_channels_per_event"],
+                    marker="o",
+                    label=f"{int(windows)} windows",
+                )
+            expected_vals = channel_df["expected_channels_per_event"].dropna().unique()
+            expected = expected_vals[0] if len(expected_vals) == 1 else None
+            if show_expected and expected is not None:
+                ax.axhline(
+                    expected,
+                    color="black",
+                    linestyle="--",
+                    linewidth=1.2,
+                    label=f"Expected ({expected:.0f})",
+                )
+            threshold_vals = channel_df["channel_ratio_threshold"].dropna().unique()
+            threshold = threshold_vals[0] if len(threshold_vals) == 1 else None
+            if show_threshold and expected is not None and threshold is not None:
+                ax.axhline(
+                    expected * threshold,
+                    color="tab:red",
+                    linestyle=":",
+                    linewidth=1.8,
+                    label=f"Threshold ({threshold:.2f}×)",
+                )
+            set_log2_with_decade_ticks(ax, "x", unit="ns")
+            if num_pulses is not None:
+                pulse_note = f", {self._pulse_label(num_pulses)}"
+            else:
+                uniq = channel_df["num_pulses"].dropna().unique()
+                pulse_note = (
+                    f", {self._pulse_label(uniq[0])}" if len(uniq) == 1 else ", mixed pulse counts"
+                )
+            ax.set_title(
+                f"Observed channels/event vs. separation ({self._channel_label(channel_count)}, pulser={pulse_rate_hz:.0f} Hz{pulse_note})"
+            )
+            ax.set_xlabel("Pulse separation (ns)")
+            ax.set_ylabel("Observed channels/event")
+            ax.grid(True, linestyle="--", alpha=0.5)
+            dedup_legend(ax, title="Capture windows")
+            plt.show()
+
+    def plot_channels_per_event_vs_separation_by_windows(
+        self,
+        pulse_rate_hz: float,
+        num_pulses: Optional[int] = None,
+        show_expected: bool = True,
+        show_threshold: bool = True,
+        y_min: Optional[float] = None,
+        y_max: Optional[float] = None,
+    ) -> None:
+        data = self.subset(pulse_rate_hz, num_pulses=num_pulses)
+        data = data.dropna(subset=["observed_channels_per_event"])
+        if data.empty:
+            raise ValueError(f"No channel-rate data for pulse_rate_hz={pulse_rate_hz}")
+        for windows, window_df in data.groupby("windows"):
+            fig, ax = plt.subplots(figsize=(10, 6))
+            x_min = window_df["separation_ns"].min() * 0.95
+            x_max = window_df["separation_ns"].max() * 1.05
+            y_min_obs = window_df["observed_channels_per_event"].min() * 0.95
+            y_max_obs = window_df["observed_channels_per_event"].max() * 1.05
+            ax.set_xlim(x_min, x_max)
+            y_min_use = y_min if y_min is not None else y_min_obs
+            y_max_use = y_max if y_max is not None else y_max_obs
+            ax.set_ylim(y_min_use, y_max_use)
+            for channel_count, channel_df in window_df.groupby("channel_count"):
+                sorted_df = channel_df.sort_values("separation_ns")
+                ax.plot(
+                    sorted_df["separation_ns"],
+                    sorted_df["observed_channels_per_event"],
+                    marker="o",
+                    label=self._channel_label(channel_count),
+                )
+            expected_vals = window_df["expected_channels_per_event"].dropna().unique()
+            expected = expected_vals[0] if len(expected_vals) == 1 else None
+            if show_expected and expected is not None:
+                ax.axhline(
+                    expected,
+                    color="black",
+                    linestyle="--",
+                    linewidth=1.2,
+                    label=f"Expected ({expected:.0f})",
+                )
+            threshold_vals = window_df["channel_ratio_threshold"].dropna().unique()
+            threshold = threshold_vals[0] if len(threshold_vals) == 1 else None
+            if show_threshold and expected is not None and threshold is not None:
+                ax.axhline(
+                    expected * threshold,
+                    color="tab:red",
+                    linestyle=":",
+                    linewidth=1.8,
+                    label=f"Threshold ({threshold:.2f}×)",
+                )
+            set_log2_with_decade_ticks(ax, "x", unit="ns")
+            if num_pulses is not None:
+                pulse_note = f", {self._pulse_label(num_pulses)}"
+            else:
+                uniq = window_df["num_pulses"].dropna().unique()
+                pulse_note = (
+                    f", {self._pulse_label(uniq[0])}" if len(uniq) == 1 else ", mixed pulse counts"
+                )
+            ax.set_title(
+                f"Observed channels/event vs. separation (windows={int(windows)}, pulser={pulse_rate_hz:.0f} Hz{pulse_note})"
+            )
+            ax.set_xlabel("Pulse separation (ns)")
+            ax.set_ylabel("Observed channels/event")
             ax.grid(True, linestyle="--", alpha=0.5)
             dedup_legend(ax, title="Active channels")
             plt.show()

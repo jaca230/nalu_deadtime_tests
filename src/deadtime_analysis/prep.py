@@ -53,6 +53,8 @@ def build_dataframe(
         search_meta = entry.get("search", {})
         pulse_meta = entry.get("pulse_sequence") or entry.get("double_pulse") or {}
         observed = entry.get("observed_rates", {})
+        channel_rates = entry.get("channel_rates", {})
+        custom_stats = entry.get("custom_stats", {})
 
         pulse_rate_hz = pulse_meta.get("repetition_rate_hz")
         num_pulses = (
@@ -84,6 +86,29 @@ def build_dataframe(
             observed_rate_hz, pulse_rate_hz, num_pulses
         )
 
+        observed_channels_per_event = channel_rates.get("observed_channels_per_event")
+        if observed_channels_per_event is None:
+            observed_channels_per_event = custom_stats.get("channels_per_event")
+        expected_channels_per_event = channel_rates.get("expected_channels_per_event")
+        if expected_channels_per_event is None:
+            expected_channels_per_event = _get_active_channel_count(entry)
+        channel_ratio_vs_expected = channel_rates.get("ratio_vs_expected")
+        if (
+            channel_ratio_vs_expected is None
+            and observed_channels_per_event is not None
+            and expected_channels_per_event
+        ):
+            channel_ratio_vs_expected = observed_channels_per_event / expected_channels_per_event
+        channel_ratio_threshold = channel_rates.get("threshold")
+        if channel_ratio_threshold is None:
+            channel_ratio_threshold = search_meta.get("channels_ratio_threshold")
+        channel_ratio_pass = None
+        if channel_ratio_vs_expected is not None and channel_ratio_threshold is not None:
+            channel_ratio_pass = channel_ratio_vs_expected > channel_ratio_threshold
+        channel_full_pass = None
+        if observed_channels_per_event is not None and expected_channels_per_event is not None:
+            channel_full_pass = observed_channels_per_event >= expected_channels_per_event
+
         rows.append(
             {
                 "timestamp": pd.to_datetime(entry.get("timestamp")),
@@ -109,6 +134,12 @@ def build_dataframe(
                 "mixed_lower_pulses": mixed_lower,
                 "mixed_upper_pulses": mixed_upper,
                 "tertiary_mode": mode_label,
+                "observed_channels_per_event": observed_channels_per_event,
+                "expected_channels_per_event": expected_channels_per_event,
+                "channel_ratio_vs_expected": channel_ratio_vs_expected,
+                "channel_ratio_threshold": channel_ratio_threshold,
+                "channel_ratio_pass": channel_ratio_pass,
+                "channel_full_pass": channel_full_pass,
             }
         )
 
