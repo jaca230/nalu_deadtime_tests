@@ -76,11 +76,14 @@ def build_dataframe(
             else None
         )
         target_ratio = search_meta.get("target_ratio")
-        target_line = (
-            pulse_rate_hz * num_pulses * target_ratio
-            if pulse_rate_hz and num_pulses and target_ratio is not None
-            else (pulse_rate_hz * target_ratio if pulse_rate_hz and target_ratio is not None else None)
-        )
+        target_line = None
+        if target_ratio is not None:
+            if observed.get("ratio_vs_double_pulse") is not None:
+                target_line = pulse_rate_hz * target_ratio if pulse_rate_hz else None
+            elif expected_rate_hz is not None:
+                target_line = expected_rate_hz * target_ratio
+            else:
+                target_line = pulse_rate_hz * target_ratio if pulse_rate_hz else None
 
         mode_label, pulse_region, mixed_lower, mixed_upper = _classify_pulse_region(
             observed_rate_hz, pulse_rate_hz, num_pulses
