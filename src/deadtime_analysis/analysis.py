@@ -173,6 +173,44 @@ class DeadtimeAnalysis:
             )
         return pd.DataFrame(rows)
 
+    def packet_ratio_table(
+        self,
+        *,
+        target_ratio: float = 2.0,
+        tolerance: float = 0.01,
+    ) -> pd.DataFrame:
+        """Find packet-rate bounds based on the observed ratio vs expected.
+
+        The upper bound is the smallest tested separation where the packet ratio meets
+        or exceeds (target_ratio - tolerance). The lower bound is the largest tested
+        separation still below that threshold (if any).
+        """
+        threshold = target_ratio - tolerance
+        rows = []
+        for (rate, channel_count, windows, num_pulses), group_df in self.df.groupby(
+            ["pulse_rate_hz", "channel_count", "windows", "num_pulses"]
+        ):
+            sub = group_df.dropna(subset=["packet_ratio_vs_expected"]).sort_values("separation_ns")
+            if sub.empty:
+                continue
+            upper_candidates = sub[sub["packet_ratio_vs_expected"] >= threshold]
+            lower_candidates = sub[sub["packet_ratio_vs_expected"] < threshold]
+            upper_bound = upper_candidates["separation_ns"].iloc[0] if not upper_candidates.empty else None
+            lower_bound = lower_candidates["separation_ns"].max() if not lower_candidates.empty else None
+            rows.append(
+                {
+                    "pulse_rate_hz": rate,
+                    "channel_count": channel_count,
+                    "windows": windows,
+                    "num_pulses": num_pulses,
+                    "packet_ratio_threshold": threshold,
+                    "packet_ratio_target": target_ratio,
+                    "packet_ratio_deadtime_ns": upper_bound,
+                    "packet_ratio_lower_bound_ns": lower_bound,
+                }
+            )
+        return pd.DataFrame(rows)
+
     # ---- Rate plots ------------------------------------------------------ #
     def plot_rate_vs_separation_by_channels(
         self,
@@ -236,8 +274,8 @@ class DeadtimeAnalysis:
             if show_stars and highlight_separations_ns:
                 for sep in highlight_separations_ns:
                     y_vals = channel_df[channel_df["separation_ns"] == sep]["observed_rate_hz"]
-                    if y_vals.empty:
-                        continue
+                if y_vals.empty:
+                    continue
                     ax.scatter(
                         [sep],
                         [y_vals.mean()],
@@ -555,6 +593,129 @@ class DeadtimeAnalysis:
             ax.grid(True, linestyle="--", alpha=0.5)
             dedup_legend(ax, title="Active channels")
             plt.show()
+
+    def _plot_packet_rate(
+        self,
+        df: pd.DataFrame,
+        group_field: str,
+        group_label_fn,
+        pulse_rate_hz: float,
+        num_pulses: Optional[int],
+        *,
+        show_expected: bool,
+        show_target: bool,
+        target_ratio: float,
+        tolerance: float,
+        y_min: Optional[float] = None,
+        y_max: Optional[float] = None,
+    ) -> None:
+        for key, group_df in df.groupby(group_field):
+            fig, ax = plt.subplots(figsize=(10, 6))
+            sorted_df = group_df.sort_values("separation_ns")
+            x_min = sorted_df["separation_ns"].min() * 0.95
+            x_max = sorted_df["separation_ns"].max() * 1.05
+            y_min_obs = sorted_df["observed_packets_per_sec"].min() * 0.95
+            y_max_obs = sorted_df["observed_packets_per_sec"].max() * 1.05
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min if y_min is not None else y_min_obs, y_max if y_max is not None else y_max_obs)
+            for label_key, sub_df in sorted_df.groupby("windows" if group_field == "channel_count" else "channel_count"):
+                ax.plot(
+                    sub_df["separation_ns"],
+                    sub_df["observed_packets_per_sec"],
+                    marker="o",
+                    label=group_label_fn(label_key),
+                )
+            expected_vals = sorted_df["expected_packets_per_sec"].dropna().unique()
+            expected = expected_vals[0] if len(expected_vals) == 1 else None
+            threshold = target_ratio - tolerance
+            if show_expected and expected is not None:
+                ax.axhline(
+                    expected,
+                    color="black",
+                    linestyle="--",
+                    linewidth=1.2,
+                    label=f"Expected ({expected:.1f})",
+                )
+            if show_target and expected is not None:
+                ax.axhline(
+                    expected * threshold,
+                    color="tab:red",
+                    linestyle=":",
+                    linewidth=1.8,
+                    label=f"Target ({threshold:.2f}×)",
+                )
+            set_log2_with_decade_ticks(ax, "x", unit="ns")
+            pulse_note = ""
+            if num_pulses is not None:
+                pulse_note = f", {self._pulse_label(num_pulses)}"
+            ax.set_title(
+                f"Observed packet rate vs. separation ({group_label_fn(key)}, pulser={pulse_rate_hz:.0f} Hz{pulse_note})"
+            )
+            ax.set_xlabel("Pulse separation (ns)")
+            ax.set_ylabel("Observed packets/s")
+            ax.grid(True, linestyle="--", alpha=0.5)
+            dedup_legend(ax, title="Capture windows" if group_field == "channel_count" else "Active channels")
+            plt.show()
+
+    def plot_packet_rate_vs_separation_by_channels(
+        self,
+        pulse_rate_hz: float,
+        num_pulses: Optional[int] = None,
+        *,
+        show_expected: bool = True,
+        show_target: bool = True,
+        target_ratio: float = 2.0,
+        tolerance: float = 0.01,
+        y_min: Optional[float] = None,
+        y_max: Optional[float] = None,
+    ) -> None:
+        data = self.subset(pulse_rate_hz, num_pulses=num_pulses)
+        data = data.dropna(subset=["observed_packets_per_sec"])
+        if data.empty:
+            raise ValueError(f"No packet-rate data for pulse_rate_hz={pulse_rate_hz}")
+        self._plot_packet_rate(
+            data,
+            "channel_count",
+            self._channel_label,
+            pulse_rate_hz,
+            num_pulses,
+            show_expected=show_expected,
+            show_target=show_target,
+            target_ratio=target_ratio,
+            tolerance=tolerance,
+            y_min=y_min,
+            y_max=y_max,
+        )
+
+    def plot_packet_rate_vs_separation_by_windows(
+        self,
+        pulse_rate_hz: float,
+        num_pulses: Optional[int] = None,
+        *,
+        show_expected: bool = True,
+        show_target: bool = True,
+        target_ratio: float = 2.0,
+        tolerance: float = 0.01,
+        y_min: Optional[float] = None,
+        y_max: Optional[float] = None,
+    ) -> None:
+        data = self.subset(pulse_rate_hz, num_pulses=num_pulses)
+        data = data.dropna(subset=["observed_packets_per_sec"])
+        if data.empty:
+            raise ValueError(f"No packet-rate data for pulse_rate_hz={pulse_rate_hz}")
+        self._plot_packet_rate(
+            data,
+            "windows",
+            lambda v: f"{int(v)} windows",
+            pulse_rate_hz,
+            num_pulses,
+            show_expected=show_expected,
+            show_target=show_target,
+            target_ratio=target_ratio,
+            tolerance=tolerance,
+            y_min=y_min,
+            y_max=y_max,
+        )
 
     # ---- Derived separation plots --------------------------------------- #
     def plot_converged_vs_windows(

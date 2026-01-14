@@ -54,6 +54,7 @@ def build_dataframe(
         pulse_meta = entry.get("pulse_sequence") or entry.get("double_pulse") or {}
         observed = entry.get("observed_rates", {})
         channel_rates = entry.get("channel_rates", {})
+        packet_rates = entry.get("packet_rates", {})
         custom_stats = entry.get("custom_stats", {})
 
         pulse_rate_hz = pulse_meta.get("repetition_rate_hz")
@@ -112,6 +113,26 @@ def build_dataframe(
         if observed_channels_per_event is not None and expected_channels_per_event is not None:
             channel_full_pass = observed_channels_per_event >= expected_channels_per_event
 
+        observed_packets_per_sec = packet_rates.get("observed_packets_per_sec")
+        expected_packets_per_sec = packet_rates.get("expected_packets_per_sec")
+        if expected_packets_per_sec is None:
+            expected_packets_per_sec = search_meta.get("expected_packets_per_sec")
+        if expected_packets_per_sec is None and pulse_rate_hz is not None:
+            expected_packets_per_sec = pulse_rate_hz
+        observed_packets_per_event = packet_rates.get("observed_packets_per_event")
+        if observed_packets_per_event is None:
+            observed_packets_per_event = custom_stats.get("packets_per_event")
+        packet_ratio_vs_expected = packet_rates.get("ratio_vs_expected")
+        if (
+            packet_ratio_vs_expected is None
+            and observed_packets_per_sec is not None
+            and expected_packets_per_sec
+        ):
+            packet_ratio_vs_expected = observed_packets_per_sec / expected_packets_per_sec
+        packet_ratio_threshold = packet_rates.get("threshold")
+        if packet_ratio_threshold is None:
+            packet_ratio_threshold = search_meta.get("target_ratio")
+
         rows.append(
             {
                 "timestamp": pd.to_datetime(entry.get("timestamp")),
@@ -143,6 +164,11 @@ def build_dataframe(
                 "channel_ratio_threshold": channel_ratio_threshold,
                 "channel_ratio_pass": channel_ratio_pass,
                 "channel_full_pass": channel_full_pass,
+                "observed_packets_per_sec": observed_packets_per_sec,
+                "expected_packets_per_sec": expected_packets_per_sec,
+                "observed_packets_per_event": observed_packets_per_event,
+                "packet_ratio_vs_expected": packet_ratio_vs_expected,
+                "packet_ratio_threshold": packet_ratio_threshold,
             }
         )
 

@@ -39,6 +39,9 @@ def _row_to_estimate(
     *,
     channel_ratio_required: bool,
     full_channels_required: bool,
+    packet_row: Optional[pd.Series],
+    packet_ratio_target: float,
+    packet_ratio_tolerance: float,
 ) -> dict:
     tested_max = float(group["separation_ns"].max())
     conv_deadtime = (
@@ -54,6 +57,15 @@ def _row_to_estimate(
     min_all_lower = (
         float(min_double_row["min_double_lower_bound_ns"]) if min_double_row is not None else None
     )
+    packet_upper = (
+        float(packet_row["packet_ratio_deadtime_ns"]) if packet_row is not None else None
+    )
+    packet_lower = (
+        float(packet_row["packet_ratio_lower_bound_ns"]) if packet_row is not None else None
+    )
+    packet_threshold = (
+        float(packet_row["packet_ratio_threshold"]) if packet_row is not None else None
+    )
     return {
         "pulse_rate_hz": float(rate),
         "channel_count": _to_int(channel_count),
@@ -61,6 +73,8 @@ def _row_to_estimate(
         "num_pulses": _to_int(num_pulses),
         "channel_ratio_required": channel_ratio_required,
         "full_channels_required": full_channels_required,
+        "packet_ratio_target": packet_ratio_target,
+        "packet_ratio_tolerance": packet_ratio_tolerance,
         "tested_max_separation_ns": float(tested_max),
         "converged_deadtime_ns": conv_deadtime,
         "converged_deadtime_us": conv_deadtime / 1000.0 if conv_deadtime is not None else None,
@@ -74,6 +88,11 @@ def _row_to_estimate(
         "min_all_pulses_lower_bound_us": (
             min_all_lower / 1000.0 if min_all_lower is not None else None
         ),
+        "packet_ratio_threshold": packet_threshold,
+        "packet_deadtime_upper_bound_ns": packet_upper,
+        "packet_deadtime_upper_bound_us": packet_upper / 1000.0 if packet_upper is not None else None,
+        "packet_deadtime_lower_bound_ns": packet_lower,
+        "packet_deadtime_lower_bound_us": packet_lower / 1000.0 if packet_lower is not None else None,
         "all_pulses_observed": min_double_row is not None,
         "note": None,
     }
@@ -84,12 +103,17 @@ def generate_estimates(
     *,
     require_channel_ratio_pass: bool = False,
     require_full_channels: bool = False,
+    packet_ratio_target: float = 2.0,
+    packet_ratio_tolerance: float = 0.01,
 ) -> List[dict]:
     df = analysis.df
     conv = analysis.converged_table()
     min_double = analysis.min_double_table(
         require_channel_ratio_pass=require_channel_ratio_pass,
         require_full_channels=require_full_channels,
+    )
+    packet_bounds = analysis.packet_ratio_table(
+        target_ratio=packet_ratio_target, tolerance=packet_ratio_tolerance
     )
     results: List[dict] = []
     for (rate, channel_count, windows, num_pulses), group_df in df.groupby(
@@ -109,6 +133,13 @@ def generate_estimates(
             & (min_double["num_pulses"] == num_pulses)
         ]
         md_row = md_row.iloc[0] if not md_row.empty else None
+        packet_row = packet_bounds[
+            (packet_bounds["pulse_rate_hz"] == rate)
+            & (packet_bounds["channel_count"] == channel_count)
+            & (packet_bounds["windows"] == windows)
+            & (packet_bounds["num_pulses"] == num_pulses)
+        ]
+        packet_row = packet_row.iloc[0] if not packet_row.empty else None
         results.append(
             _row_to_estimate(
                 rate=rate,
@@ -120,6 +151,9 @@ def generate_estimates(
                 min_double_row=md_row,
                 channel_ratio_required=require_channel_ratio_pass,
                 full_channels_required=require_full_channels,
+                packet_row=packet_row,
+                packet_ratio_target=packet_ratio_target,
+                packet_ratio_tolerance=packet_ratio_tolerance,
             )
         )
     return sorted(
@@ -158,6 +192,18 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         action="store_true",
         help="Require all channels to be observed when computing min-all-pulses response.",
     )
+    parser.add_argument(
+        "--packet-ratio-target",
+        type=float,
+        default=2.0,
+        help="Target packet ratio (default=2.0 for double-pulse doubling).",
+    )
+    parser.add_argument(
+        "--packet-ratio-tolerance",
+        type=float,
+        default=0.01,
+        help="Tolerance subtracted from the target ratio when finding the upper bound.",
+    )
     args = parser.parse_args(argv)
 
     analysis = DeadtimeAnalysis.from_jsonl([str(p) for p in args.data_files])
@@ -165,6 +211,8 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         analysis,
         require_channel_ratio_pass=args.require_channel_threshold,
         require_full_channels=args.require_full_channels,
+        packet_ratio_target=args.packet_ratio_target,
+        packet_ratio_tolerance=args.packet_ratio_tolerance,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(estimates, indent=2))
